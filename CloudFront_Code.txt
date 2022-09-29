@@ -1,0 +1,100 @@
+using namespace System.Net
+
+# Input bindings are passed in via param block.
+param($Request, $TriggerMetadata)
+
+# Write to the Azure Functions log stream.
+Write-Host "PowerShell HTTP trigger function processed a request."
+
+
+
+$currentUTCtime = (Get-Date).ToUniversalTime()
+$tenantId = ''
+ # Replace with your Workspace ID
+$customerId = ""
+# Replace with your Primary Key
+$sharedKey = ""
+$logType = "AWS_CloudFront_CL"
+
+# Create the function to create the authorization signature
+Function Build-Signature ($customerId, $sharedKey, $date, $contentLength, $method, $contentType, $resource)
+{
+
+    $xHeaders = "x-ms-date:" + $date
+    $stringToHash = $method + "`n" + $contentLength + "`n" + $contentType + "`n" + $xHeaders + "`n" + $resource
+    
+    $bytesToHash = [Text.Encoding]::UTF8.GetBytes($stringToHash)
+    $keyBytes = [Convert]::FromBase64String($sharedKey)
+    
+    $sha256 = New-Object System.Security.Cryptography.HMACSHA256
+    $sha256.Key = $keyBytes
+    $calculatedHash = $sha256.ComputeHash($bytesToHash)
+    $encodedHash = [Convert]::ToBase64String($calculatedHash)
+    $authorization = 'SharedKey {0}:{1}' -f $customerId,$encodedHash
+    return $authorization
+}
+ 
+# Create the function to create and post the request
+Function Post-LogAnalyticsData($customerId, $sharedKey, $body, $logType)
+{
+    $method = "POST"
+    $contentType = "application/json"
+    $resource = "/api/logs"
+    $rfc1123date = [DateTime]::UtcNow.ToString("r")
+    $contentLength = $body.Length
+    $signature = Build-Signature `
+    -customerId $customerId `
+    -sharedKey $sharedKey `
+    -date $rfc1123date `
+    -contentLength $contentLength `
+    -fileName $fileName `
+    -method $method `
+    -contentType $contentType `
+    -resource $resource
+    $uri = "https://" + $customerId + ".ods.opinsights.azure.com" + $resource + "?api-version=2016-04-01"
+    
+
+    $headers = @{
+    "Authorization" = $signature;
+    "Log-Type" = $logType;
+    "x-ms-date" = $rfc1123date;
+    "time-generated-field" = $TimeStampField;
+}
+ 
+$response = Invoke-WebRequest -Uri $uri -Method $method -ContentType $contentType -Headers $headers -Body $body -UseBasicParsing
+return $response.StatusCode
+ 
+}
+ 
+# Specify a field with the created time for the records
+$TimeStampField = get-date
+$TimeStampField = $TimeStampField.GetDateTimeFormats(115)
+
+
+
+$base64data = $Request.Body.Replace("`"","") # CloudFront data is base64 gzip
+$data = [System.Convert]::FromBase64String($base64data)
+$ms = New-Object System.IO.MemoryStream
+$ms.Write($data, 0, $data.Length)
+$ms.Seek(0,0) | Out-Null
+$sr = New-Object System.IO.StreamReader(New-Object System.IO.Compression.GZipStream($ms, [System.IO.Compression.CompressionMode]::Decompress))
+
+while ($line = $sr.ReadLine()) { 
+
+    if (!$line.StartsWith("#"))
+    {
+        $line = '{"RawEvent":"' +$line +'"}'
+        Post-LogAnalyticsData -customerId $CustomerId -sharedKey $SharedKey -body ([System.Text.Encoding]::UTF8.GetBytes($line)) -logType $LogType
+    }
+    Write-Host ""
+}
+
+
+$body = "This HTTP triggered function executed successfully. Pass a name in the query string or in the request body for a personalized response."
+
+
+# Associate values to output bindings by calling 'Push-OutputBinding'.
+Push-OutputBinding -Name Response -Value ([HttpResponseContext]@{
+    StatusCode = [HttpStatusCode]::OK
+    Body = $body
+})
