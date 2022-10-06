@@ -1,0 +1,104 @@
+# Used codes
+# https://learn.microsoft.com/en-us/microsoft-365/security/defender-endpoint/api-hello-world?view=o365-worldwide
+# https://learn.microsoft.com/en-us/microsoft-365/security/defender-endpoint/exposed-apis-full-sample-powershell?view=o365-worldwide
+# https://learn.microsoft.com/en-us/microsoft-365/security/defender-endpoint/get-alerts?view=o365-worldwide
+
+# Input bindings are passed in via param block.
+param($Timer)
+
+# Get the current universal time in the default string format.
+$currentUTCtime = (Get-Date).ToUniversalTime()
+
+$lookbackTime = $currentUTCtime.AddDays(-310)
+$lookbackTime = Get-Date $lookbackTime  -Format "yyyy-MM-ddTHH:mm:ssK"
+
+
+# The 'IsPastDue' property is 'true' when the current function invocation is later than scheduled.
+if ($Timer.IsPastDue) {
+    Write-Host "PowerShell timer is running late!"
+}
+
+# Write an information log with the current time.
+Write-Host "PowerShell timer trigger function ran! TIME: $currentUTCtime"
+
+$tenantId = ''
+$appId = ''
+$appSecret = ''
+
+$CustomerId = ""  
+$SharedKey = ""
+
+Function Build-Signature ($customerId, $sharedKey, $date, $contentLength, $method, $contentType, $resource)
+{
+    $xHeaders = "x-ms-date:" + $date
+    $stringToHash = $method + "`n" + $contentLength + "`n" + $contentType + "`n" + $xHeaders + "`n" + $resource
+
+    $bytesToHash = [Text.Encoding]::UTF8.GetBytes($stringToHash)
+    $keyBytes = [Convert]::FromBase64String($sharedKey)
+
+    $sha256 = New-Object System.Security.Cryptography.HMACSHA256
+    $sha256.Key = $keyBytes
+    $calculatedHash = $sha256.ComputeHash($bytesToHash)
+    $encodedHash = [Convert]::ToBase64String($calculatedHash)
+    $authorization = 'SharedKey {0}:{1}' -f $customerId,$encodedHash
+    return $authorization
+}
+
+# Create the function to create and post the request
+Function Post-LogAnalyticsData($customerId, $sharedKey, $body, $logType)
+{
+    $method = "POST"
+    $contentType = "application/json"
+    $resource = "/api/logs"
+    $rfc1123date = [DateTime]::UtcNow.ToString("r")
+    $contentLength = $body.Length
+    $signature = Build-Signature `
+        -customerId $customerId `
+        -sharedKey $sharedKey `
+        -date $rfc1123date `
+        -contentLength $contentLength `
+        -method $method `
+        -contentType $contentType `
+        -resource $resource
+    $uri = "https://" + $customerId + ".ods.opinsights.azure.com" + $resource + "?api-version=2016-04-01"
+
+    $headers = @{
+        "Authorization" = $signature;
+        "Log-Type" = $logType;
+        "x-ms-date" = $rfc1123date;
+        "time-generated-field" = $TimeStampField;
+    }
+
+    $response = Invoke-WebRequest -Uri $uri -Method $method -ContentType $contentType -Headers $headers -Body $body -UseBasicParsing
+    return $response.StatusCode
+
+}
+
+
+
+$resourceAppIdUri = 'https://api.securitycenter.microsoft.com'
+$oAuthUri = "https://login.microsoftonline.com/$TenantId/oauth2/token"
+$authBody = [Ordered] @{
+    resource = "$resourceAppIdUri"
+    client_id = "$appId"
+    client_secret = "$appSecret"
+    grant_type = 'client_credentials'
+}
+$authResponse = Invoke-RestMethod -Method Post -Uri $oAuthUri -Body $authBody -ErrorAction Stop
+$token = $authResponse.access_token
+
+#Get latest alert
+$alertUrl = "https://api.securitycenter.microsoft.com/api/alerts?`$filter=alertCreationTime+ge+$lookbackTime"
+
+$headers = @{ 
+    'Content-Type' = 'application/json'
+    Accept = 'application/json'
+    Authorization = "Bearer $token" 
+}
+$alertResponse = Invoke-WebRequest -Method Get -Uri $alertUrl -Headers $headers -ErrorAction Stop
+#$alerts =  ($alertResponse | ConvertFrom-Json).value
+
+$logType = "MDEAlerts"
+Post-LogAnalyticsData -customerId $CustomerId -sharedKey $SharedKey -body ([System.Text.Encoding]::UTF8.GetBytes($alertResponse)) -logType $logType  
+
+
